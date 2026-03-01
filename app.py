@@ -293,28 +293,26 @@ with tab_add:
     if not month_b:
         st.warning(
             f"Aucun budget mensuel n'existe pour {exp_month_key}. "
-            "Crée le budget dans l'onglet Budgets avant d'ajouter une dépense."
+            "Va dans l'onglet Budgets et clique sur 'Créer budget du mois depuis le template' avant d'ajouter une dépense."
         )
-        st.stop()
+    else:
+        categories = list(month_b.keys())
+        if not categories:
+            st.info("Aucune catégorie dans le budget de ce mois.")
+        else:
+            with st.form("add_expense", clear_on_submit=True):
+                cat = st.selectbox("Catégorie", options=categories)
+                amount = st.number_input("Montant (€)", min_value=0.0, step=0.5, format="%.2f")
+                note = st.text_input("Note (optionnel)", max_chars=80)
+                ok = st.form_submit_button("Ajouter")
 
-    categories = list(month_b.keys())
-    if not categories:
-        st.info("Aucune catégorie dans le budget de ce mois.")
-        st.stop()
-
-    with st.form("add_expense", clear_on_submit=True):
-        cat = st.selectbox("Catégorie", options=categories)
-        amount = st.number_input("Montant (€)", min_value=0.0, step=0.5, format="%.2f")
-        note = st.text_input("Note (optionnel)", max_chars=80)
-        ok = st.form_submit_button("Ajouter")
-
-        if ok:
-            if amount <= 0:
-                st.error("Le montant doit être supérieur à 0.")
-            else:
-                append_expense(d, cat, float(amount), note)
-                st.success("Dépense ajoutée.")
-                st.rerun()
+                if ok:
+                    if amount <= 0:
+                        st.error("Le montant doit être supérieur à 0.")
+                    else:
+                        append_expense(d, cat, float(amount), note)
+                        st.success("Dépense ajoutée.")
+                        st.rerun()
 
 # -------- Budgets
 with tab_budgets:
@@ -422,3 +420,4 @@ with tab_list:
             if e.get("note"):
                 line += f" | {e['note']}"
             st.write(line)
+
