@@ -1,6 +1,6 @@
-import time
-from datetime import date, datetime
+from __future__ import annotations
 
+from datetime import date, datetime
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -10,23 +10,36 @@ from google.oauth2.service_account import Credentials
 # Google Sheets connection
 # =========================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SHEET_TPL = "template"
+SHEET_BUD = "budgets"
+SHEET_EXP = "expenses"
+
+CACHE_TTL_SECONDS = 300  # 5 minutes (réduit énormément les lectures)
 
 
 @st.cache_resource
 def gs_client():
-    if "google" not in st.secrets or "service_account" not in st.secrets["google"]:
-        raise RuntimeError("Secrets Google manquants. Configure [google.service_account] dans Streamlit Secrets.")
+    """
+    Client gspread construit une seule fois (cache_resource).
+    """
     creds_dict = dict(st.secrets["google"]["service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
+@st.cache_resource
 def open_sheet():
+    """
+    Ouvre le Google Sheet une seule fois (cache_resource).
+    """
     sheet_id = st.secrets["google"]["sheet_id"]
     return gs_client().open_by_key(sheet_id)
 
 
 def ws(name: str):
+    """
+    Renvoie la worksheet par nom.
+    """
     return open_sheet().worksheet(name)
 
 
@@ -52,18 +65,25 @@ def _now_id() -> str:
     return str(int(datetime.utcnow().timestamp() * 1000))
 
 
-def _cache_bust():
-    # Invalidate cached reads after write operations
+def cache_bust():
+    """
+    Après une écriture, on invalide les caches de données.
+    """
     st.cache_data.clear()
 
 
+def is_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "quota" in msg or "429" in msg or "rate limit" in msg
+
+
 # =========================
-# Sheet data access
+# Data access (read)
 # =========================
-@st.cache_data(ttl=120)
-def load_template() -> dict:
-    rows = ws("template").get_all_records()
-    out = {}
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def load_template() -> dict[str, float]:
+    rows = ws(SHEET_TPL).get_all_records()  # nécessite headers: category, budget
+    out: dict[str, float] = {}
     for r in rows:
         cat = str(r.get("category", "")).strip()
         if not cat:
@@ -72,35 +92,9 @@ def load_template() -> dict:
     return out
 
 
-def upsert_template(cat: str, budget: float) -> None:
-    w = ws("template")
-    values = w.get_all_values()
-    # values[0] is header row
-    target_row = None
-    for i in range(1, len(values)):
-        if len(values[i]) > 0 and values[i][0].strip() == cat:
-            target_row = i + 1  # 1-indexed
-            break
-    if target_row:
-        w.update_cell(target_row, 2, float(budget))
-    else:
-        w.append_row([cat, float(budget)], value_input_option="USER_ENTERED")
-    _cache_bust()
-
-
-def delete_template(cat: str) -> None:
-    w = ws("template")
-    values = w.get_all_values()
-    for i in range(1, len(values)):
-        if len(values[i]) > 0 and values[i][0].strip() == cat:
-            w.delete_rows(i + 1)
-            break
-    _cache_bust()
-
-
-@st.cache_data(ttl=120)
-def load_budgets_all() -> dict:
-    rows = ws("budgets").get_all_records()
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def load_budgets_all() -> dict[str, dict[str, float]]:
+    rows = ws(SHEET_BUD).get_all_records()  # headers: month, category, budget
     out: dict[str, dict[str, float]] = {}
     for r in rows:
         m = str(r.get("month", "")).strip()
@@ -112,53 +106,10 @@ def load_budgets_all() -> dict:
     return out
 
 
-def upsert_budget(month: str, cat: str, budget: float) -> None:
-    w = ws("budgets")
-    values = w.get_all_values()
-    # header: month, category, budget
-    target_row = None
-    for i in range(1, len(values)):
-        row = values[i]
-        if len(row) >= 2 and row[0].strip() == month and row[1].strip() == cat:
-            target_row = i + 1
-            break
-
-    if target_row:
-        w.update_cell(target_row, 3, float(budget))
-    else:
-        w.append_row([month, cat, float(budget)], value_input_option="USER_ENTERED")
-    _cache_bust()
-
-
-def delete_budget(month: str, cat: str) -> None:
-    w = ws("budgets")
-    values = w.get_all_values()
-    for i in range(1, len(values)):
-        row = values[i]
-        if len(row) >= 2 and row[0].strip() == month and row[1].strip() == cat:
-            w.delete_rows(i + 1)
-            break
-    _cache_bust()
-
-
-def delete_month_budgets(month: str) -> None:
-    w = ws("budgets")
-    values = w.get_all_values()
-    # delete from bottom to top to keep indexes valid
-    to_delete = []
-    for i in range(1, len(values)):
-        row = values[i]
-        if len(row) >= 1 and row[0].strip() == month:
-            to_delete.append(i + 1)
-    for r in reversed(to_delete):
-        w.delete_rows(r)
-    _cache_bust()
-
-
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_expenses_all() -> list[dict]:
-    rows = ws("expenses").get_all_records()
-    out = []
+    rows = ws(SHEET_EXP).get_all_records()  # headers: id,date,month,category,amount,note
+    out: list[dict] = []
     for r in rows:
         out.append(
             {
@@ -173,20 +124,105 @@ def load_expenses_all() -> list[dict]:
     return out
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def load_all() -> tuple[dict[str, float], dict[str, dict[str, float]], list[dict]]:
+    """
+    Point clé anti-quota:
+    - Un seul point d'entrée cache_data pour charger les 3 tables.
+    - Le code UI réutilise ces variables (ne rappelle pas load_* partout).
+    """
+    tpl = load_template()
+    buds = load_budgets_all()
+    exps = load_expenses_all()
+    return tpl, buds, exps
+
+
+# =========================
+# Data access (write)
+# =========================
+def upsert_template(cat: str, budget: float) -> None:
+    w = ws(SHEET_TPL)
+    values = w.get_all_values()
+    target_row = None
+    for i in range(1, len(values)):
+        if len(values[i]) > 0 and values[i][0].strip() == cat:
+            target_row = i + 1
+            break
+
+    if target_row:
+        w.update_cell(target_row, 2, float(budget))
+    else:
+        w.append_row([cat, float(budget)], value_input_option="USER_ENTERED")
+
+    cache_bust()
+
+
+def delete_template(cat: str) -> None:
+    w = ws(SHEET_TPL)
+    values = w.get_all_values()
+    for i in range(1, len(values)):
+        if len(values[i]) > 0 and values[i][0].strip() == cat:
+            w.delete_rows(i + 1)
+            break
+    cache_bust()
+
+
+def upsert_budget(month: str, cat: str, budget: float) -> None:
+    w = ws(SHEET_BUD)
+    values = w.get_all_values()
+    target_row = None
+
+    for i in range(1, len(values)):
+        row = values[i]
+        if len(row) >= 2 and row[0].strip() == month and row[1].strip() == cat:
+            target_row = i + 1
+            break
+
+    if target_row:
+        w.update_cell(target_row, 3, float(budget))
+    else:
+        w.append_row([month, cat, float(budget)], value_input_option="USER_ENTERED")
+
+    cache_bust()
+
+
+def delete_budget(month: str, cat: str) -> None:
+    w = ws(SHEET_BUD)
+    values = w.get_all_values()
+    for i in range(1, len(values)):
+        row = values[i]
+        if len(row) >= 2 and row[0].strip() == month and row[1].strip() == cat:
+            w.delete_rows(i + 1)
+            break
+    cache_bust()
+
+
+def delete_month_budgets(month: str) -> None:
+    w = ws(SHEET_BUD)
+    values = w.get_all_values()
+    to_delete = []
+    for i in range(1, len(values)):
+        row = values[i]
+        if len(row) >= 1 and row[0].strip() == month:
+            to_delete.append(i + 1)
+    for r in reversed(to_delete):
+        w.delete_rows(r)
+    cache_bust()
+
+
 def append_expense(d: date, cat: str, amount: float, note: str) -> None:
-    w = ws("expenses")
+    w = ws(SHEET_EXP)
     m = month_key(d)
     w.append_row(
         [_now_id(), d.isoformat(), m, cat, float(amount), note.strip()],
         value_input_option="USER_ENTERED",
     )
-    _cache_bust()
+    cache_bust()
 
 
 def delete_expenses_for_month_category(month: str, cat: str) -> None:
-    w = ws("expenses")
+    w = ws(SHEET_EXP)
     values = w.get_all_values()
-    # header: id,date,month,category,amount,note
     to_delete = []
     for i in range(1, len(values)):
         row = values[i]
@@ -194,15 +230,18 @@ def delete_expenses_for_month_category(month: str, cat: str) -> None:
             to_delete.append(i + 1)
     for r in reversed(to_delete):
         w.delete_rows(r)
-    _cache_bust()
+    cache_bust()
 
 
+# =========================
+# Business logic helpers
+# =========================
 def expenses_for_month(expenses: list[dict], month: str) -> list[dict]:
     return [e for e in expenses if e.get("month") == month]
 
 
-def totals_by_category(expenses: list[dict]) -> dict:
-    totals = {}
+def totals_by_category(expenses: list[dict]) -> dict[str, float]:
+    totals: dict[str, float] = {}
     for e in expenses:
         cat = e.get("category")
         if not cat:
@@ -217,11 +256,14 @@ def totals_by_category(expenses: list[dict]) -> dict:
 st.set_page_config(page_title="Budget mensuel", page_icon="💶", layout="centered")
 st.title("💶 Suivi de budget mensuel")
 
+# Chargement unique (anti quota)
 try:
-    template = load_template()
-    all_budgets = load_budgets_all()
-    expenses = load_expenses_all()
+    template, all_budgets, expenses = load_all()
 except Exception as e:
+    if is_quota_error(e):
+        st.error("Google Sheets: quota de lecture atteint (erreur 429).")
+        st.info("Attends 1 à 2 minutes, puis rafraîchis la page. (On a déjà ajouté un cache pour limiter les lectures.)")
+        st.stop()
     st.error("Connexion Google Sheets impossible. Vérifie les Secrets et le partage du Google Sheet avec le service account.")
     st.exception(e)
     st.stop()
@@ -289,7 +331,9 @@ with tab_add:
     d = st.date_input("Date", value=today)
     exp_month_key = month_key(d)
 
+    # IMPORTANT: on n'appelle pas load_* ici, on utilise all_budgets déjà chargé
     month_b = all_budgets.get(exp_month_key, {})
+
     if not month_b:
         st.warning(
             f"Aucun budget mensuel n'existe pour {exp_month_key}. "
@@ -310,9 +354,15 @@ with tab_add:
                     if amount <= 0:
                         st.error("Le montant doit être supérieur à 0.")
                     else:
-                        append_expense(d, cat, float(amount), note)
-                        st.success("Dépense ajoutée.")
-                        st.rerun()
+                        try:
+                            append_expense(d, cat, float(amount), note)
+                            st.success("Dépense ajoutée.")
+                            st.rerun()
+                        except Exception as e:
+                            if is_quota_error(e):
+                                st.error("Quota Google Sheets atteint. Réessaie dans 1 à 2 minutes.")
+                            else:
+                                st.exception(e)
 
 # -------- Budgets
 with tab_budgets:
@@ -333,11 +383,17 @@ with tab_budgets:
                 if not name:
                     st.error("Nom de catégorie requis.")
                 else:
-                    upsert_template(name, float(new_budget))
-                    st.success(f"Template mis à jour : {name}")
-                    st.rerun()
+                    try:
+                        upsert_template(name, float(new_budget))
+                        st.success(f"Template mis à jour : {name}")
+                        st.rerun()
+                    except Exception as e:
+                        if is_quota_error(e):
+                            st.error("Quota Google Sheets atteint. Réessaie dans 1 à 2 minutes.")
+                        else:
+                            st.exception(e)
 
-        template = load_template()
+        # on utilise template déjà chargé (pas de re-load ici)
         if template:
             st.divider()
             st.write("Catégories du template")
@@ -346,8 +402,14 @@ with tab_budgets:
                 c1.write(f"**{cat}**")
                 c2.write(f"{_to_float(template[cat]):.2f} €")
                 if c3.button("Supprimer", key=f"del_tpl_{cat}"):
-                    delete_template(cat)
-                    st.rerun()
+                    try:
+                        delete_template(cat)
+                        st.rerun()
+                    except Exception as e:
+                        if is_quota_error(e):
+                            st.error("Quota Google Sheets atteint. Réessaie dans 1 à 2 minutes.")
+                        else:
+                            st.exception(e)
         else:
             st.info("Template vide. Ajoute au moins une catégorie.")
 
@@ -355,8 +417,6 @@ with tab_budgets:
         st.markdown(f"### Budget du mois : {selected_month}")
         st.caption("Le budget mensuel est une copie figée du template. Tu peux ensuite le modifier.")
 
-        template = load_template()
-        all_budgets = load_budgets_all()
         exists = selected_month in all_budgets
 
         overwrite = st.checkbox("Écraser le budget du mois si déjà créé", value=False)
@@ -369,24 +429,33 @@ with tab_budgets:
                 if exists and not overwrite:
                     st.warning("Ce mois existe déjà. Coche Écraser si tu veux le recréer depuis le template.")
                 else:
-                    if overwrite and exists:
-                        delete_month_budgets(selected_month)
-                    for cat, bud in template.items():
-                        upsert_budget(selected_month, cat, _to_float(bud))
-                    st.success("Budget mensuel créé depuis le template.")
-                    st.rerun()
+                    try:
+                        if overwrite and exists:
+                            delete_month_budgets(selected_month)
+
+                        for cat, bud in template.items():
+                            upsert_budget(selected_month, cat, _to_float(bud))
+
+                        st.success("Budget mensuel créé depuis le template.")
+                        st.rerun()
+                    except Exception as e:
+                        if is_quota_error(e):
+                            st.error("Quota Google Sheets atteint. Réessaie dans 1 à 2 minutes.")
+                        else:
+                            st.exception(e)
 
         st.divider()
-        all_budgets = load_budgets_all()
+
+        # IMPORTANT: on utilise month_budgets déjà chargé
         month_budgets = all_budgets.get(selected_month, {})
 
         if not month_budgets:
             st.info("Aucun budget mensuel pour ce mois. Clique sur le bouton pour le créer.")
         else:
             st.write("Modifier le budget mensuel (snapshot)")
+
             with st.form("edit_month_budget"):
                 cat = st.selectbox("Catégorie (mois)", options=list(month_budgets.keys()))
-
                 current_val = float(month_budgets.get(cat, 0.0))
 
                 new_val = st.number_input(
@@ -394,15 +463,21 @@ with tab_budgets:
                     value=current_val,
                     min_value=0.0,
                     step=10.0,
-                    format="%.2f"
+                    format="%.2f",
                 )
 
                 ok = st.form_submit_button("Mettre à jour")
 
                 if ok:
-                    upsert_budget(selected_month, cat, float(new_val))
-                    st.success("Budget mensuel mis à jour.")
-                    st.rerun()
+                    try:
+                        upsert_budget(selected_month, cat, float(new_val))
+                        st.success("Budget mensuel mis à jour.")
+                        st.rerun()
+                    except Exception as e:
+                        if is_quota_error(e):
+                            st.error("Quota Google Sheets atteint. Réessaie dans 1 à 2 minutes.")
+                        else:
+                            st.exception(e)
 
             st.divider()
             st.write("Catégories du mois")
@@ -412,9 +487,15 @@ with tab_budgets:
                 c2.write(f"{_to_float(month_budgets[cat]):.2f} €")
 
                 if c3.button("Supprimer", key=f"del_month_{selected_month}_{cat}"):
-                    delete_budget(selected_month, cat)
-                    delete_expenses_for_month_category(selected_month, cat)
-                    st.rerun()
+                    try:
+                        delete_budget(selected_month, cat)
+                        delete_expenses_for_month_category(selected_month, cat)
+                        st.rerun()
+                    except Exception as e:
+                        if is_quota_error(e):
+                            st.error("Quota Google Sheets atteint. Réessaie dans 1 à 2 minutes.")
+                        else:
+                            st.exception(e)
 
 # -------- Expense list
 with tab_list:
@@ -431,7 +512,3 @@ with tab_list:
             if e.get("note"):
                 line += f" | {e['note']}"
             st.write(line)
-
-
-
-
