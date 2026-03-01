@@ -60,7 +60,7 @@ def _cache_bust():
 # =========================
 # Sheet data access
 # =========================
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=120)
 def load_template() -> dict:
     rows = ws("template").get_all_records()
     out = {}
@@ -98,7 +98,7 @@ def delete_template(cat: str) -> None:
     _cache_bust()
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=120)
 def load_budgets_all() -> dict:
     rows = ws("budgets").get_all_records()
     out: dict[str, dict[str, float]] = {}
@@ -155,7 +155,7 @@ def delete_month_budgets(month: str) -> None:
     _cache_bust()
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=120)
 def load_expenses_all() -> list[dict]:
     rows = ws("expenses").get_all_records()
     out = []
@@ -431,6 +431,7 @@ with tab_list:
             if e.get("note"):
                 line += f" | {e['note']}"
             st.write(line)
+
 
 
 
