@@ -386,8 +386,8 @@ with tab_budgets:
             st.write("Modifier le budget mensuel (snapshot)")
             with st.form("edit_month_budget"):
                 cat = st.selectbox("Catégorie (mois)", options=list(month_budgets.keys()))
-                new_val = st.number_input("Nouveau budget (€)", min_value=0.0, step=10.0, format="%.2f")
-                ok = st.form_submit_button("Mettre à jour")
+                current_val = float(month_budgets.get(cat, 0.0))
+                new_val = st.number_input("Nouveau budget (€)", value=current_val, min_value=0.0, step=10.0, format="%.2f")                ok = st.form_submit_button("Mettre à jour")
                 if ok:
                     upsert_budget(selected_month, cat, float(new_val))
                     st.success("Budget mensuel mis à jour.")
@@ -420,4 +420,5 @@ with tab_list:
             if e.get("note"):
                 line += f" | {e['note']}"
             st.write(line)
+
 
